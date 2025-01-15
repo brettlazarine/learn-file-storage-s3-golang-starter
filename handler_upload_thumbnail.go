@@ -1,12 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +48,10 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	defer file.Close()
 
 	mediaType := header.Header.Get("Content-Type")
+	if mediaType == "" {
+		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
+		return
+	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -55,40 +59,26 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	metaData, err := cfg.db.GetVideo(videoID)
+	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error getting video", err)
 		return
 	}
-	if userID != metaData.CreateVideoParams.UserID {
+	if userID != video.UserID {
 		respondWithError(w, http.StatusUnauthorized, "Not the owner", nil)
 		return
 	}
 
-	tn := thumbnail{
-		data:      data,
-		mediaType: mediaType,
-	}
-	videoThumbnails[videoID] = tn
+	encodedData := base64.StdEncoding.EncodeToString(data)
+	dataURL := fmt.Sprintf("data:%v;base64,%v", mediaType, encodedData)
+	
+	video.ThumbnailURL = &dataURL
 
-	tmURL := fmt.Sprintf("http://localhost:%v/api/thumbnails/%v", cfg.port, videoID)
-
-	dbVideo := database.Video{
-		ID:           videoID,
-		ThumbnailURL: &tmURL,
-		VideoURL:     metaData.VideoURL,
-		CreateVideoParams: database.CreateVideoParams{
-			Title:       metaData.Title,
-			Description: metaData.Description,
-			UserID:      metaData.UserID,
-		},
-	}
-
-	err = cfg.db.UpdateVideo(dbVideo)
+	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error updating video", err)
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, dbVideo)
+	respondWithJSON(w, http.StatusOK, video)
 }
