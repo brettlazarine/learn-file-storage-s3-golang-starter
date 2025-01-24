@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,9 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 
 	"github.com/google/uuid"
 )
@@ -126,12 +131,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	videoURL := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, videoKey)
+	bucket := cfg.s3Bucket
+	videoURL := fmt.Sprintf("%v,%v", bucket, videoKey)
 	video.VideoURL = &videoURL
 
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error updating video", err)
+		return
+	}
+
+	video, err = cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error signing video", err)
 		return
 	}
 
@@ -196,4 +208,38 @@ func processVideoForFastStart(filepath string) (string, error) {
 	}
 
 	return outputFilePath, nil
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	presignClient := s3.NewPresignClient(s3Client)
+	presignedURL, err := presignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", fmt.Errorf("error presigning URL: %v", err)
+	}
+
+	return presignedURL.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	if video.VideoURL == nil {
+		return video, nil
+	}
+
+	videoSplit := strings.Split(*video.VideoURL, ",")
+	if len(videoSplit) != 2 {
+		return video, nil
+	}
+	bucket := videoSplit[0]
+	key := videoSplit[1]
+
+	signedURL, err := generatePresignedURL(cfg.s3Client, bucket, key, 5*time.Minute)
+	if err != nil {
+		return video, fmt.Errorf("error generating presigned URL: %v", err)
+	}
+
+	video.VideoURL = &signedURL
+	return video, nil
 }
